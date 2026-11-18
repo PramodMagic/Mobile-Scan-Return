@@ -141,8 +141,9 @@ async function detectBarcodes(canvas,formats){
         const res=await new BarcodeDetector({formats:use}).detect(canvas);
         if(res.length){
           const lin=res.filter(r=>LINEAR.includes(r.format));
-          const pool=lin.length?lin:res;
-          const b=pool.slice().sort((a,b)=>b.rawValue.length-a.rawValue.length)[0];
+          const area=r=>{const bb=r.boundingBox;return bb?bb.width*bb.height:0};
+          const pool=(lin.length?lin:res).slice().sort((a,b)=>area(b)-area(a)||b.rawValue.length-a.rawValue.length);
+          const b=pool[0];
           let hint=null;const p=b.cornerPoints;
           if(p&&p.length>1){const th=Math.atan2(p[1].y-p[0].y,p[1].x-p[0].x)*180/Math.PI;hint=((-Math.round(th/90)*90)%360+360)%360}
           return {v:b.rawValue.trim(),hint,all:[...new Set(pool.map(r=>r.rawValue.trim()))]};
@@ -182,18 +183,18 @@ function extractFields(text,codes,extra=[]){
   const key=v=>norm(v).replace(/[OQDCILSBZG]/g,c=>DIG[c]||c);
   const put=(arr,v)=>{
     v=String(v||'').trim().replace(/[.,;:]+$/,'');
-    if(v.length<5||(A&&(norm(v)==norm(A)||norm(v).includes(norm(A)))))return;
-    if([...strong,...weak].some(x=>key(x)==key(v)))return;
+    if(v.length<3||(A&&(norm(v)==norm(A)||norm(v).includes(norm(A)))))return;
+    if([...strong,...weak].some(x=>key(x)==key(v)||key(v).includes(key(x))))return;
     arr.push(v);
   };
   // 1) label par "Order ID / Order No / Sub Order No" likha ho
-  for(const x of text.matchAll(/(?:sub\s*order|customer\s*order|order)\s*(?:id|no\.?|number|#|ref(?:erence)?)\s*[:\-#.]?\s*(?=[A-Za-z0-9_\-\/]*\d)([A-Za-z0-9][A-Za-z0-9_\-\/]{4,})/gi))put(strong,x[1]);
+  for(const x of text.matchAll(/(?:sub\s*order|customer\s*order|[O0]rder)\s*(?:[I1l]d|no\.?|number|#|ref(?:erence)?)\s*[:\-#.]?\s*(?=[A-Za-z0-9_\-\/]*\d)([A-Za-z0-9][A-Za-z0-9_\-\/]{2,})/gi))put(strong,x[1]);
   // 2) jaane-pehchaane format (bina likhe bhi): Amazon, Flipkart, Meesho
   for(const x of text.matchAll(/\b([0-9OQDCILSBZG]{3}-[0-9OQDCILSBZG]{7}-[0-9OQDCILSBZG]{7})\b/gi))put(strong,x[1].toUpperCase().replace(/[OQDCILSBZG]/g,c=>DIG[c]));
   for(const x of text.matchAll(/\b[O0]D(\d{15,22})\b/g))put(strong,'OD'+x[1]);
   for(const x of text.matchAll(/\b(\d{12,19}_\d{1,2})\b/g))put(strong,x[1]);
   // 3) label par doosra barcode ho
-  extra.forEach(v=>put(strong,v));
+  extra.forEach(v=>put(weak,v));
   // 4) kuch likha nahi: lambe codes me se andaza (⚠ check karna hoga)
   const skip=/invoice|gst|hsn|\bpin(code)?\b|phone|\bmob|date|total|tax|weight|dimension|awb|waybill|tracking|pickup|\bcod\b|amount/i;
   for(const line of text.split('\n')){
@@ -235,7 +236,8 @@ async function scan(inp){
 }
 async function runOcr(card,c,hint){
   try{
-    const f=extractFields(await ocrText(c,hint),card.awb?[card.awb]:[],card.extra||[]);
+    const txt=await ocrText(c,hint);card.dbg=txt;
+    const f=extractFields(txt,card.awb?[card.awb]:[],card.extra||[]);
     if(!card.order_id&&f.order_id){card.order_id=f.order_id;card.orderGuess=f.guess}
     card.orderOpts=f.opts;
     if(!card.seller&&f.seller)card.seller=f.seller;
@@ -250,12 +252,18 @@ async function runOcr(card,c,hint){
 }
 const statusText=c=>(c.ocr?'⏳ Order ID / Seller padh raha hai... (tab tak SKU/Qty bhar sakte ho)  ':'')+(c.awbOcr?'⚠ AWB text se aaya, barcode ke number se match karke check karo  ':'')+(c.orderGuess&&c.order_id?'⚠ Order ID label par likha nahi mila, andaza se bhara hai. Check karo, neeche aur options bhi hain.':'');
 const orderChips=(c,i)=>(c.orderOpts||[]).map((o,j)=>o!=c.order_id?`<span class="chip" onclick="pickOrder(${i},${j})">${esc(o)}</span>`:'').join('');
+const awbChips=(c,i)=>(c.extra&&c.extra.length)?'<div class="note">Ye AWB nahi hai? Doosra barcode chuno:</div>'+c.extra.map((o,j)=>`<span class="chip" onclick="pickAwb(${i},${j})">${esc(o)}</span>`).join(''):'';
+const dbgText=c=>'Barcodes mile: '+([c.awb,...(c.extra||[])].filter(Boolean).join(' | ')||'koi nahi')+'\n\nOCR text:\n'+(c.dbg||'(abhi padh raha hai...)');
+function pickAwb(i,j){const c=cards[i];const old=c.awb;c.awb=c.extra[j];c.extra[j]=old;c.awbOcr=false;
+  c.duplicate=dupOf(c,rows)||(mode=='multi'&&dupOf(c,cards.filter(x=>x!==c)));render();
+  if(c.duplicate)popup('Ye pehle se saved hai:<br><b>'+esc(c.awb)+'</b>')}
 function pickOrder(i,j){cards[i].order_id=cards[i].orderOpts[j];cards[i].orderGuess=false;render()}
 function syncCard(c){
   const set=(p,v)=>{const e=$(p+c.id);if(e&&e.value!==v&&document.activeElement!==e)e.value=v};
   set('o_',c.order_id);set('a_',c.awb);set('s_',c.seller);
   const st=$('st_'+c.id);if(st)st.textContent=statusText(c);
   const oc=$('oc_'+c.id);if(oc)oc.innerHTML=orderChips(c,cards.indexOf(c));
+  const db=$('dbg_'+c.id);if(db)db.textContent=dbgText(c);
   const el=$('c_'+c.id);if(el)el.className='card'+(c.duplicate?' dup':'');
 }
 
@@ -291,7 +299,7 @@ function render(){
    ${c.duplicate?'<b style="color:#dc2626">DUPLICATE - save nahi hoga</b>':''}
    <div class="note" id="st_${c.id}">${statusText(c)}</div>
    <label>Order ID</label><input type="text" id="o_${c.id}" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value"><div id="oc_${c.id}">${orderChips(c,i)}</div>
-   <label>AWB</label><input type="text" id="a_${c.id}" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value">
+   <label>AWB</label><input type="text" id="a_${c.id}" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value"><div id="ac_${c.id}">${awbChips(c,i)}</div>
    <label>Seller</label><input type="text" id="s_${c.id}" value="${esc(c.seller)}" oninput="cards[${i}].seller=this.value">
    <label>SKU (type karo ya scan karo)</label>
    <div style="display:flex;gap:6px"><input type="text" value="${esc(c.sku)}" oninput="cards[${i}].sku=this.value"><button class="btn s" type="button" onclick="skuIdx=${i};skuFile.click()">📷 Scan</button></div>
@@ -301,6 +309,7 @@ function render(){
      <label><input type="radio" name="cl${i}" ${c.claim=='Yes'?'checked':''} onchange="cards[${i}].claim='Yes'"> Yes</label>
      <label><input type="radio" name="cl${i}" ${c.claim!='Yes'?'checked':''} onchange="cards[${i}].claim='No'"> No</label></div>
    <label>Remark</label><input type="text" value="${esc(c.remark)}" oninput="cards[${i}].remark=this.value">
+   <details style="margin-top:8px"><summary class="note">🔍 Kya padha gaya (galat lage to dekho)</summary><pre id="dbg_${c.id}" style="white-space:pre-wrap;font-size:11px;background:#f3f4f6;padding:8px;border-radius:6px">${esc(dbgText(c))}</pre></details>
    <button class="btn r" style="margin-top:8px" onclick="cards.splice(${i},1);render()">Hatao</button></div>`).join('');
   $('saveBtn').style.display=cards.length?'':'none';
   persist();
