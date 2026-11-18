@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#1f2937">
+<title>Label Scanner</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:#f3f4f6;color:#111}
+header{background:#1f2937;color:#fff;padding:12px 16px;font-weight:600}
+.tabs{display:flex;background:#fff;border-bottom:1px solid #ddd}
+.tabs button{flex:1;padding:12px;border:0;background:none;font-size:15px;cursor:pointer}
+.tabs button.on{border-bottom:3px solid #2563eb;color:#2563eb;font-weight:600}
+main{max-width:900px;margin:auto;padding:12px}
+.card{background:#fff;border-radius:10px;padding:12px;margin:10px 0;box-shadow:0 1px 3px #0002}
+.card.dup{border:2px solid #dc2626;background:#fef2f2}
+label{display:block;font-size:12px;color:#555;margin-top:8px}
+input[type=text],input[type=number],select{width:100%;padding:10px;border:1px solid #ccc;border-radius:6px;font-size:15px}
+.btn{padding:12px 16px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-size:15px;cursor:pointer;text-decoration:none;display:inline-block}
+.btn.g{background:#16a34a}.btn.r{background:#dc2626}.btn.s{background:#6b7280}
+.big{width:100%;padding:18px;font-size:18px}
+.seg{display:flex;gap:8px;margin:8px 0}.seg button{flex:1;padding:10px;border:1px solid #2563eb;background:#fff;color:#2563eb;border-radius:8px}
+.seg button.on{background:#2563eb;color:#fff}
+.radio label{display:inline;font-size:15px;color:#111;margin-right:18px}
+.chip{display:inline-block;background:#e0e7ff;color:#1e3a8a;border-radius:14px;padding:5px 10px;margin:6px 6px 0 0;font-size:13px;cursor:pointer}
+#modal,#busy{display:none;position:fixed;inset:0;background:#0007;align-items:center;justify-content:center;z-index:9}
+#modal div,#busy div{background:#fff;padding:20px;border-radius:12px;max-width:340px;text-align:center}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #eee;padding:4px}
+td input,td select{min-width:70px;padding:6px;font-size:13px}
+.wrap{overflow-x:auto}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:8px;display:none;z-index:10}
+.note{font-size:12px;color:#666;margin:6px 0}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+<header>📦 Label Scanner</header>
+<div class="tabs"><button id="t1" class="on" onclick="tab(1)">Scan</button><button id="t2" onclick="tab(2)">Records / Edit</button></div>
+<main>
+<section id="p1">
+  <div class="seg"><button id="m1" class="on" onclick="setMode('single')">Single Label</button><button id="m2" onclick="setMode('multi')">Multi Label</button></div>
+  <div class="note" id="modeNote"></div>
+  <input id="cam" type="file" accept="image/*" capture="environment" hidden onchange="scan(this)">
+  <input id="skuFile" type="file" accept="image/*" capture="environment" hidden onchange="scanSku(this)">
+  <button class="btn big" onclick="cam.click()">📷 Photo kheencho</button>
+  <div id="cards"></div>
+  <button id="saveBtn" class="btn g big" style="display:none;margin-top:8px" onclick="save()">✅ Save karo</button>
+</section>
+<section id="p2" style="display:none">
+  <div class="card">
+    <input type="text" id="q" placeholder="Search (AWB / Order ID / SKU...)" oninput="renderRec()">
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn g" onclick="exportXlsx()">⬇ Export Excel</button>
+      <button class="btn s" onclick="imp.click()">⬆ Import Excel</button>
+      <input id="imp" type="file" accept=".xlsx,.xls,.csv" hidden onchange="doImport(this)">
+    </div>
+    <div class="note">Data isi browser me save hota hai. Regular Export Excel karke backup le lo.</div>
+  </div>
+  <div class="card wrap"><table id="tbl"></table></div>
+</section>
+</main>
+<div id="modal"><div><h2 id="mtitle" style="color:#dc2626;margin-top:0">⚠️ Duplicate!</h2><p id="mmsg"></p><button class="btn" onclick="modal.style.display='none'">OK</button></div></div>
+<div id="busy"><div><b id="busyMsg">Scan ho raha hai...</b><p class="note">Pehli baar thoda time lag sakta hai (OCR load hota hai)</p></div></div>
+<div id="toast"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const norm=v=>String(v||'').replace(/\s+/g,'').toUpperCase();
+const pad=n=>String(n).padStart(2,'0');
+const nowStr=()=>{const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`};
+const uid=()=>Math.random().toString(36).slice(2,10);
+function load(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v??d}catch(e){return d}}
+
+/* ---------- state ---------- */
+let rows=load('ls_rows',[]);
+const st=load('ls_state',{});
+let mode=st.mode||'single',cards=Array.isArray(st.cards)?st.cards:[],curTab=st.tab||1,skuIdx=0;
+function persist(){try{localStorage.setItem('ls_state',JSON.stringify({mode,cards,tab:curTab}))}catch(e){}}
+function saveRows(){try{localStorage.setItem('ls_rows',JSON.stringify(rows));return true}catch(e){popup('Storage full hai! Export Excel karke purani rows hata do.','⚠️ Error');return false}}
+function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2600)}
+function popup(m,title='⚠️ Duplicate!'){$('mtitle').textContent=title;$('mmsg').innerHTML=m;$('modal').style.display='flex'}
+function busy(m){if(m){$('busyMsg').textContent=m;$('busy').style.display='flex'}else $('busy').style.display='none'}
+function tab(n){curTab=n;persist();$('p1').style.display=n==1?'':'none';$('p2').style.display=n==2?'':'none';$('t1').className=n==1?'on':'';$('t2').className=n==2?'on':'';if(n==2)renderRec()}
+function setMode(m){mode=m;persist();$('m1').className=m=='single'?'on':'';$('m2').className=m=='multi'?'on':'';
+  $('modeNote').textContent=m=='single'?'Single: ek baar me ek label. Nayi photo purane card ko replace karegi.':'Multi: ek ke baad ek photo lo, sab cards list me judte jayenge, phir ek saath Save karo.'}
+
+/* ---------- duplicate ---------- */
+function dupOf(r,list){
+  if(norm(r.awb))return list.some(x=>norm(x.awb)==norm(r.awb));
+  if(norm(r.order_id))return list.some(x=>!norm(x.awb)&&norm(x.order_id)==norm(r.order_id));
+  return false;
+}
+
+/* ---------- image helpers ---------- */
+async function loadCanvas(file,max=1600){
+  const bmp=await createImageBitmap(file,{imageOrientation:'from-image'});
+  const s=Math.min(1,max/Math.max(bmp.width,bmp.height));
+  const c=document.createElement('canvas');c.width=Math.round(bmp.width*s);c.height=Math.round(bmp.height*s);
+  c.getContext('2d').drawImage(bmp,0,0,c.width,c.height);return c;
+}
+function rot(c,a){
+  if(!a)return c;const o=document.createElement('canvas');const sw=a==90||a==270;
+  o.width=sw?c.height:c.width;o.height=sw?c.width:c.height;
+  const x=o.getContext('2d');x.translate(o.width/2,o.height/2);x.rotate(a*Math.PI/180);x.drawImage(c,-c.width/2,-c.height/2);return o;
+}
+
+/* ---------- barcode (ZXing) ---------- */
+let reader;
+function getReader(){
+  if(!reader){
+    const h=new Map(),F=ZXing.BarcodeFormat;
+    h.set(ZXing.DecodeHintType.TRY_HARDER,true);
+    h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[F.CODE_128,F.CODE_39,F.EAN_13,F.EAN_8,F.UPC_A,F.ITF,F.CODABAR,F.QR_CODE,F.DATA_MATRIX]);
+    reader=new ZXing.BrowserMultiFormatReader(h);
+  }
+  return reader;
+}
+async function decodeBarcode(canvas){
+  for(const a of [0,90,270,180]){
+    try{
+      const r=await getReader().decodeFromImageUrl(rot(canvas,a).toDataURL('image/jpeg',0.92));
+      const v=r.getText().trim();if(v)return {v,angle:a};
+    }catch(e){}
+  }
+  return null;
+}
+
+/* ---------- OCR (Tesseract.js) ---------- */
+let worker;
+async function getWorker(){if(!worker)worker=await Tesseract.createWorker('eng');return worker}
+async function ocrText(canvas,hint=0){
+  const w=await getWorker();
+  const order=[hint,...[0,90,270,180].filter(a=>a!==hint)];
+  let best={score:-1,text:''};
+  for(const a of order){
+    const {data}=await w.recognize(rot(canvas,a));
+    const score=(data.words||[]).filter(x=>x.confidence>60).reduce((s,x)=>s+x.text.length,0);
+    if(score>best.score)best={score,text:data.text};
+    if(score>=60)break;
+  }
+  return best.text;
+}
+
+/* ---------- field extraction ---------- */
+function extractFields(text,codes){
+  let order='',awb='',seller='',m;
+  m=text.match(/(?:sub\s*order|order)\s*(?:id|no\.?|number|#)\s*[:\-#]?\s*(?=[A-Za-z0-9_\-]*\d)([A-Za-z0-9][A-Za-z0-9_\-]{5,})/i);
+  if(m)order=m[1];
+  else{m=text.match(/\b(OD\d{15,22}|\d{3}-\d{7}-\d{7})\b/);if(m)order=m[1]}
+  for(const c of codes){if(c.length>=8&&norm(c)!=norm(order)&&!(order&&norm(c).includes(norm(order)))){awb=c;break}}
+  if(!awb){m=text.match(/(?:awb|way\s*bill|tracking)\s*(?:id|no\.?|number|#)?\s*[:\-#]?\s*(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{8,})/i);
+    if(m&&norm(m[1])!=norm(order))awb=m[1]}
+  if(!awb){for(const d of (text.match(/\b\d{10,16}\b/g)||[])){if(norm(d)!=norm(order)){awb=d;break}}}
+  m=text.match(/(?:sold\s*by|seller|ship(?:ped)?\s*from|shipper)\s*[:\-]?\s*([^\n,|]{3,60})/i);
+  if(m)seller=m[1].split(/GST|Phone|Mob|PIN/i)[0].replace(/^[\s:\-]+|[\s:\-]+$/g,'');
+  return {order_id:order,awb,seller};
+}
+
+/* ---------- scan label ---------- */
+async function scan(inp){
+  const f=inp.files[0];inp.value='';if(!f)return;
+  busy('Label scan ho raha hai...');
+  let res={order_id:'',awb:'',seller:''};
+  try{
+    const c=await loadCanvas(f);
+    const bc=await decodeBarcode(c);
+    const text=await ocrText(c,bc?bc.angle:0);
+    res=extractFields(text,bc?[bc.v]:[]);
+  }catch(e){console.error(e);toast('Scan me dikkat aayi, details khud bhar do')}
+  busy(null);
+  const card={...res,sku:'',qty:'',claim:'No',remark:'',duplicate:dupOf(res,rows)||(mode=='multi'&&dupOf(res,cards))};
+  if(!(res.order_id||res.awb||res.seller))toast('Label padha nahi gaya, details khud bhar do');
+  if(mode=='single')cards=[card];else cards.push(card);
+  render();
+  if(card.duplicate)popup('Ye pehle se saved hai:<br><b>'+esc(res.awb||res.order_id)+'</b>');
+}
+
+/* ---------- scan SKU ---------- */
+async function scanSku(inp){
+  const f=inp.files[0];inp.value='';if(!f)return;
+  busy('SKU scan ho raha hai...');
+  const c0=cards[skuIdx];
+  try{
+    const c=await loadCanvas(f);
+    const bc=await decodeBarcode(c);
+    if(bc){c0.sku=bc.v;c0.skuOpts=[];toast('SKU mil gaya')}
+    else{
+      const text=await ocrText(c,0);
+      const cands=[];
+      text.split('\n').map(x=>x.trim()).forEach(l=>{if(l.length>=3&&l.length<=40&&/[A-Za-z0-9]/.test(l)&&!cands.includes(l))cands.push(l)});
+      const m=text.match(/sku\s*[:\-#]?\s*([A-Za-z0-9][A-Za-z0-9_\-\. ]{2,40})/i);
+      if(m){c0.sku=m[1].trim();toast('SKU mil gaya')}else toast(cands.length?'SKU pakka nahi mila, neeche se chuno ya type karo':'SKU nahi mila, type kar do');
+      c0.skuOpts=cands.slice(0,6);
+    }
+  }catch(e){console.error(e);toast('SKU scan nahi hua, type kar do')}
+  busy(null);render();
+}
+function pickSku(i,j){cards[i].sku=cards[i].skuOpts[j];render()}
+
+/* ---------- cards ---------- */
+function render(){
+  $('cards').innerHTML=cards.map((c,i)=>`<div class="card ${c.duplicate?'dup':''}">
+   ${c.duplicate?'<b style="color:#dc2626">DUPLICATE - save nahi hoga</b>':''}
+   <label>Order ID</label><input type="text" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value">
+   <label>AWB</label><input type="text" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value">
+   <label>Seller</label><input type="text" value="${esc(c.seller)}" oninput="cards[${i}].seller=this.value">
+   <label>SKU (type karo ya scan karo)</label>
+   <div style="display:flex;gap:6px"><input type="text" value="${esc(c.sku)}" oninput="cards[${i}].sku=this.value"><button class="btn s" type="button" onclick="skuIdx=${i};skuFile.click()">📷 Scan</button></div>
+   ${(c.skuOpts||[]).map((o,j)=>o!=c.sku?`<span class="chip" onclick="pickSku(${i},${j})">${esc(o)}</span>`:'').join('')}
+   <label>Received Qty</label><input type="number" inputmode="numeric" value="${esc(c.qty)}" oninput="cards[${i}].qty=this.value">
+   <label>Claim</label><div class="radio">
+     <label><input type="radio" name="cl${i}" ${c.claim=='Yes'?'checked':''} onchange="cards[${i}].claim='Yes'"> Yes</label>
+     <label><input type="radio" name="cl${i}" ${c.claim!='Yes'?'checked':''} onchange="cards[${i}].claim='No'"> No</label></div>
+   <label>Remark</label><input type="text" value="${esc(c.remark)}" oninput="cards[${i}].remark=this.value">
+   <button class="btn r" style="margin-top:8px" onclick="cards.splice(${i},1);render()">Hatao</button></div>`).join('');
+  $('saveBtn').style.display=cards.length?'':'none';
+  persist();
+}
+$('cards').addEventListener('input',persist);
+$('cards').addEventListener('change',persist);
+
+function clean(d){return {order_id:String(d.order_id||'').trim(),awb:String(d.awb||'').trim(),seller:String(d.seller||'').trim(),
+  sku:String(d.sku||'').trim(),qty:String(d.qty||'').trim(),claim:/^(yes|y|true)$/i.test(String(d.claim||''))?'Yes':'No',remark:String(d.remark||'').trim()}}
+const hasData=r=>['order_id','awb','seller','sku','qty','remark'].some(k=>r[k]);
+
+function save(){
+  let saved=0;const dups=[];
+  for(const c of cards){
+    const r=clean(c);
+    if(!hasData(r))continue;
+    if(dupOf(r,rows)){dups.push(r.awb||r.order_id);continue}
+    rows.push({...r,scanned_at:nowStr(),id:uid()});saved++;
+  }
+  if(!saveRows())return;
+  cards=[];render();toast(saved+' label save hue');
+  if(dups.length)popup('Duplicate skip hue:<br><b>'+dups.map(esc).join('<br>')+'</b>');
+}
+
+/* ---------- records ---------- */
+const F=['order_id','awb','seller','sku','qty','claim','remark'];
+function renderRec(){
+  const q=$('q').value.toLowerCase();
+  const list=rows.filter(r=>!q||F.some(k=>String(r[k]).toLowerCase().includes(q))).slice().reverse();
+  $('tbl').innerHTML='<tr><th>Order ID</th><th>AWB</th><th>Seller</th><th>SKU</th><th>Qty</th><th>Claim</th><th>Remark</th><th></th></tr>'+
+   list.map(r=>'<tr id="r'+r.id+'">'+F.map(k=>k=='claim'
+     ?`<td><select data-k="claim"><option ${r.claim=='No'?'selected':''}>No</option><option ${r.claim=='Yes'?'selected':''}>Yes</option></select></td>`
+     :`<td><input type="text" data-k="${k}" value="${esc(r[k])}"></td>`).join('')+
+     `<td style="white-space:nowrap"><button class="btn g" onclick="upd('${r.id}')">Save</button> <button class="btn r" onclick="del('${r.id}')">X</button></td></tr>`).join('');
+}
+function upd(id){
+  const o={};document.querySelectorAll('#r'+id+' [data-k]').forEach(e=>o[e.dataset.k]=e.value);
+  const n=clean(o);
+  if(dupOf(n,rows.filter(r=>r.id!==id))){popup('Ye AWB/Order ID kisi aur row me pehle se hai');return}
+  Object.assign(rows.find(r=>r.id===id),n);
+  if(saveRows())toast('Update ho gaya');
+}
+function del(id){if(!confirm('Ye row delete karni hai?'))return;rows=rows.filter(r=>r.id!==id);saveRows();renderRec()}
+
+/* ---------- Excel import / export ---------- */
+const HEAD=['Order ID','AWB','Seller','SKU','Received Qty','Claim','Remark','Scanned At'];
+function exportXlsx(){
+  if(!rows.length){toast('Export karne ke liye koi data nahi');return}
+  const data=rows.map(r=>[r.order_id,r.awb,r.seller,r.sku,r.qty,r.claim,r.remark,r.scanned_at]);
+  const ws=XLSX.utils.aoa_to_sheet([HEAD,...data]);
+  ws['!cols']=[22,20,22,18,13,8,30,20].map(w=>({wch:w}));
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Labels');
+  const d=new Date();XLSX.writeFile(wb,`labels_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.xlsx`);
+}
+async function doImport(inp){
+  const f=inp.files[0];inp.value='';if(!f)return;
+  try{
+    const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
+    const data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+    const alias={orderid:'order_id',awb:'awb',seller:'seller',sku:'sku',receivedqty:'qty',qty:'qty',claim:'claim',remark:'remark',scannedat:'scanned_at'};
+    const idx={};(data[0]||[]).forEach((h,i)=>{const k=alias[norm(h).toLowerCase()];if(k)idx[k]=i});
+    let added=0,skipped=0;
+    for(const line of data.slice(1)){
+      const d={};for(const k in idx)d[k]=line[idx[k]];
+      const r=clean(d);if(!hasData(r))continue;
+      if(dupOf(r,rows)){skipped++;continue}
+      rows.push({...r,scanned_at:String(d.scanned_at||nowStr()),id:uid()});added++;
+    }
+    if(saveRows()){popup('Import: '+added+' naye<br>Duplicate skip: '+skipped,'✅ Import ho gaya');renderRec()}
+  }catch(e){console.error(e);popup('File padh nahi payi. .xlsx file chuno.','⚠️ Error')}
+}
+
+/* ---------- start ---------- */
+setMode(mode);render();tab(curTab);
+if(cards.length)toast(cards.length+' unsaved label wapas aa gaye');
+</script>
+</body>
+</html>
