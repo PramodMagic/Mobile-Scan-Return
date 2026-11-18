@@ -36,7 +36,7 @@ td input,td select{min-width:70px;padding:6px;font-size:13px}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
-<header>📦 Label Scanner</header>
+<header>📦 Label Scanner <span id="sync" style="float:right;font-size:12px;font-weight:400"></span></header>
 <div class="tabs"><button id="t1" class="on" onclick="tab(1)">Scan</button><button id="t2" onclick="tab(2)">Records / Edit</button></div>
 <main>
 <section id="p1">
@@ -54,9 +54,10 @@ td input,td select{min-width:70px;padding:6px;font-size:13px}
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn g" onclick="exportXlsx()">⬇ Export Excel</button>
       <button class="btn s" onclick="imp.click()">⬆ Import Excel</button>
+      <button class="btn s" onclick="setPass()">🔑 Passcode</button>
       <input id="imp" type="file" accept=".xlsx,.xls,.csv" hidden onchange="doImport(this)">
     </div>
-    <div class="note">Data isi browser me save hota hai. Regular Export Excel karke backup le lo.</div>
+    <div class="note">Data cloud me save hota hai, mobile aur computer dono par same dikhta hai.</div>
   </div>
   <div class="card wrap"><table id="tbl"></table></div>
 </section>
@@ -79,11 +80,10 @@ let rows=load('ls_rows',[]);
 const st=load('ls_state',{});
 let mode=st.mode||'single',cards=Array.isArray(st.cards)?st.cards:[],curTab=st.tab||1,skuIdx=0;
 function persist(){try{localStorage.setItem('ls_state',JSON.stringify({mode,cards,tab:curTab}))}catch(e){}}
-function saveRows(){try{localStorage.setItem('ls_rows',JSON.stringify(rows));return true}catch(e){popup('Storage full hai! Export Excel karke purani rows hata do.','⚠️ Error');return false}}
 function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2600)}
 function popup(m,title='⚠️ Duplicate!'){$('mtitle').textContent=title;$('mmsg').innerHTML=m;$('modal').style.display='flex'}
 function busy(m){if(m){$('busyMsg').textContent=m;$('busy').style.display='flex'}else $('busy').style.display='none'}
-function tab(n){curTab=n;persist();$('p1').style.display=n==1?'':'none';$('p2').style.display=n==2?'':'none';$('t1').className=n==1?'on':'';$('t2').className=n==2?'on':'';if(n==2)renderRec()}
+function tab(n){curTab=n;persist();$('p1').style.display=n==1?'':'none';$('p2').style.display=n==2?'':'none';$('t1').className=n==1?'on':'';$('t2').className=n==2?'on':'';if(n==2){renderRec();refresh()}}
 function setMode(m){mode=m;persist();$('m1').className=m=='single'?'on':'';$('m2').className=m=='multi'?'on':'';
   $('modeNote').textContent=m=='single'?'Single: ek baar me ek label. Nayi photo purane card ko replace karegi.':'Multi: ek ke baad ek photo lo, sab cards list me judte jayenge, phir ek saath Save karo.'}
 
@@ -141,10 +141,11 @@ async function detectBarcodes(canvas,formats){
         const res=await new BarcodeDetector({formats:use}).detect(canvas);
         if(res.length){
           const lin=res.filter(r=>LINEAR.includes(r.format));
-          const b=(lin.length?lin:res).sort((a,b)=>b.rawValue.length-a.rawValue.length)[0];
+          const pool=lin.length?lin:res;
+          const b=pool.slice().sort((a,b)=>b.rawValue.length-a.rawValue.length)[0];
           let hint=null;const p=b.cornerPoints;
           if(p&&p.length>1){const th=Math.atan2(p[1].y-p[0].y,p[1].x-p[0].x)*180/Math.PI;hint=((-Math.round(th/90)*90)%360+360)%360}
-          return {v:b.rawValue.trim(),hint};
+          return {v:b.rawValue.trim(),hint,all:[...new Set(pool.map(r=>r.rawValue.trim()))]};
         }
       }
     }catch(e){console.warn(e)}
@@ -174,20 +175,46 @@ async function ocrText(canvas,hint){
 
 /* ---------- field extraction ---------- */
 const DIG={O:'0',Q:'0',D:'0',C:'0',I:'1',L:'1',S:'5',B:'8',Z:'2',G:'6'};
-function extractFields(text,codes){
-  let order='',awb='',seller='',awbOcr=false,m;
-  // Amazon order id (OCR ki galti sudharke): 403-0926952-7075550
-  m=text.match(/\b([0-9OQDCILSBZG]{3}-[0-9OQDCILSBZG]{7}-[0-9OQDCILSBZG]{7})\b/i);
-  if(m)order=m[1].toUpperCase().replace(/[OQDCILSBZG]/g,c=>DIG[c]);
-  if(!order){m=text.match(/\b(OD\d{15,22})\b/);if(m)order=m[1]}
-  if(!order){m=text.match(/(?:sub\s*order|order)\s*(?:id|no\.?|number|#)\s*[:\-#]?\s*(?=[A-Za-z0-9_\-]*\d)([A-Za-z0-9][A-Za-z0-9_\-]{5,})/i);if(m)order=m[1]}
-  for(const c of codes){if(c.length>=8&&norm(c)!=norm(order)){awb=c;break}}
-  if(!awb){m=text.match(/(?:awb|way\s*bill|tracking)\s*(?:id|no\.?|number|#)?\s*[:\-#]?\s*(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{8,})/i);
-    if(m&&norm(m[1])!=norm(order)){awb=m[1];awbOcr=true}}
-  if(!awb){for(const d of (text.match(/\b\d{10,16}\b/g)||[])){if(norm(d)!=norm(order)){awb=d;awbOcr=true;break}}}
+function extractFields(text,codes,extra=[]){
+  let seller='',awb='',awbOcr=false,m;
+  const A=codes[0]||'';
+  const strong=[],weak=[];
+  const key=v=>norm(v).replace(/[OQDCILSBZG]/g,c=>DIG[c]||c);
+  const put=(arr,v)=>{
+    v=String(v||'').trim().replace(/[.,;:]+$/,'');
+    if(v.length<5||(A&&(norm(v)==norm(A)||norm(v).includes(norm(A)))))return;
+    if([...strong,...weak].some(x=>key(x)==key(v)))return;
+    arr.push(v);
+  };
+  // 1) label par "Order ID / Order No / Sub Order No" likha ho
+  for(const x of text.matchAll(/(?:sub\s*order|customer\s*order|order)\s*(?:id|no\.?|number|#|ref(?:erence)?)\s*[:\-#.]?\s*(?=[A-Za-z0-9_\-\/]*\d)([A-Za-z0-9][A-Za-z0-9_\-\/]{4,})/gi))put(strong,x[1]);
+  // 2) jaane-pehchaane format (bina likhe bhi): Amazon, Flipkart, Meesho
+  for(const x of text.matchAll(/\b([0-9OQDCILSBZG]{3}-[0-9OQDCILSBZG]{7}-[0-9OQDCILSBZG]{7})\b/gi))put(strong,x[1].toUpperCase().replace(/[OQDCILSBZG]/g,c=>DIG[c]));
+  for(const x of text.matchAll(/\b[O0]D(\d{15,22})\b/g))put(strong,'OD'+x[1]);
+  for(const x of text.matchAll(/\b(\d{12,19}_\d{1,2})\b/g))put(strong,x[1]);
+  // 3) label par doosra barcode ho
+  extra.forEach(v=>put(strong,v));
+  // 4) kuch likha nahi: lambe codes me se andaza (⚠ check karna hoga)
+  const skip=/invoice|gst|hsn|\bpin(code)?\b|phone|\bmob|date|total|tax|weight|dimension|awb|waybill|tracking|pickup|\bcod\b|amount/i;
+  for(const line of text.split('\n')){
+    if(skip.test(line))continue;
+    for(const t of (line.match(/\b[A-Za-z0-9][A-Za-z0-9\-_\/]{7,26}\b/g)||[])){
+      if(!/\d/.test(t))continue;
+      if(/^\d{4}-\d{2}-\d{2}/.test(t)||/^\d{2}[A-Z]{5}\d{4}[A-Z]/.test(t))continue;   // date, GSTIN
+      if(!/[A-Za-z]/.test(t)&&t.replace(/\D/g,'').length<12)continue;               // pincode/phone jaise chhote number
+      put(weak,t);
+    }
+  }
+  const order=strong[0]||weak[0]||'';
+  if(A)awb=A;
+  else{
+    m=text.match(/(?:awb|way\s*bill|tracking)\s*(?:id|no\.?|number|#)?\s*[:\-#]?\s*(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{8,})/i);
+    if(m&&norm(m[1])!=norm(order)){awb=m[1];awbOcr=true}
+    if(!awb){for(const d of (text.match(/\b\d{10,16}\b/g)||[])){if(norm(d)!=norm(order)){awb=d;awbOcr=true;break}}}
+  }
   m=text.match(/(?:sold\s*by|seller|ship(?:ped)?\s*from|shipper)\s*[:\-]?\s*([^\n,|]{3,60})/i);
   if(m)seller=m[1].split(/GST|Phone|Mob|PIN/i)[0].replace(/^[\s:\-]+|[\s:\-]+$/g,'');
-  return {order_id:order,awb,seller,awbOcr};
+  return {order_id:order,awb,seller,awbOcr,opts:[...strong,...weak].slice(0,6),guess:!strong.length&&!!weak.length};
 }
 
 /* ---------- scan label: AWB turant, baaki OCR background me ---------- */
@@ -198,6 +225,7 @@ async function scan(inp){
   try{c=await loadCanvas(f,1600);bc=await detectBarcodes(c,FMT_MAIN)}catch(e){console.error(e)}
   busy(null);
   const card={id:uid(),order_id:'',awb:bc?bc.v:'',seller:'',sku:'',qty:'',claim:'No',remark:'',ocr:!!c};
+  if(bc)card.extra=(bc.all||[]).filter(x=>x!==bc.v);
   card.duplicate=dupOf(card,rows)||(mode=='multi'&&dupOf(card,cards));
   if(mode=='single')cards=[card];else cards.push(card);
   render();
@@ -207,8 +235,9 @@ async function scan(inp){
 }
 async function runOcr(card,c,hint){
   try{
-    const f=extractFields(await ocrText(c,hint),card.awb?[card.awb]:[]);
-    if(!card.order_id&&f.order_id)card.order_id=f.order_id;
+    const f=extractFields(await ocrText(c,hint),card.awb?[card.awb]:[],card.extra||[]);
+    if(!card.order_id&&f.order_id){card.order_id=f.order_id;card.orderGuess=f.guess}
+    card.orderOpts=f.opts;
     if(!card.seller&&f.seller)card.seller=f.seller;
     if(!card.awb&&f.awb){card.awb=f.awb;card.awbOcr=true}
   }catch(e){console.error(e)}
@@ -219,10 +248,14 @@ async function runOcr(card,c,hint){
   syncCard(card);persist();
   if(card.duplicate&&!was)popup('Ye pehle se saved hai:<br><b>'+esc(card.awb||card.order_id)+'</b>');
 }
+const statusText=c=>(c.ocr?'⏳ Order ID / Seller padh raha hai... (tab tak SKU/Qty bhar sakte ho)  ':'')+(c.awbOcr?'⚠ AWB text se aaya, barcode ke number se match karke check karo  ':'')+(c.orderGuess&&c.order_id?'⚠ Order ID label par likha nahi mila, andaza se bhara hai. Check karo, neeche aur options bhi hain.':'');
+const orderChips=(c,i)=>(c.orderOpts||[]).map((o,j)=>o!=c.order_id?`<span class="chip" onclick="pickOrder(${i},${j})">${esc(o)}</span>`:'').join('');
+function pickOrder(i,j){cards[i].order_id=cards[i].orderOpts[j];cards[i].orderGuess=false;render()}
 function syncCard(c){
   const set=(p,v)=>{const e=$(p+c.id);if(e&&e.value!==v&&document.activeElement!==e)e.value=v};
   set('o_',c.order_id);set('a_',c.awb);set('s_',c.seller);
-  const st=$('st_'+c.id);if(st)st.textContent=(c.ocr?'⏳ Order ID / Seller padh raha hai... (tab tak SKU/Qty bhar sakte ho)  ':'')+(c.awbOcr?'⚠ AWB text se aaya, barcode ke number se match karke check karo':'');
+  const st=$('st_'+c.id);if(st)st.textContent=statusText(c);
+  const oc=$('oc_'+c.id);if(oc)oc.innerHTML=orderChips(c,cards.indexOf(c));
   const el=$('c_'+c.id);if(el)el.className='card'+(c.duplicate?' dup':'');
 }
 
@@ -256,8 +289,8 @@ function render(){
   cards.forEach(c=>{c.id=c.id||uid()});
   $('cards').innerHTML=cards.map((c,i)=>`<div class="card ${c.duplicate?'dup':''}" id="c_${c.id}">
    ${c.duplicate?'<b style="color:#dc2626">DUPLICATE - save nahi hoga</b>':''}
-   <div class="note" id="st_${c.id}">${c.ocr?'⏳ Order ID / Seller padh raha hai... (tab tak SKU/Qty bhar sakte ho)  ':''}${c.awbOcr?'⚠ AWB text se aaya, barcode ke number se match karke check karo':''}</div>
-   <label>Order ID</label><input type="text" id="o_${c.id}" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value">
+   <div class="note" id="st_${c.id}">${statusText(c)}</div>
+   <label>Order ID</label><input type="text" id="o_${c.id}" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value"><div id="oc_${c.id}">${orderChips(c,i)}</div>
    <label>AWB</label><input type="text" id="a_${c.id}" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value">
    <label>Seller</label><input type="text" id="s_${c.id}" value="${esc(c.seller)}" oninput="cards[${i}].seller=this.value">
    <label>SKU (type karo ya scan karo)</label>
@@ -279,16 +312,81 @@ function clean(d){return {order_id:String(d.order_id||'').trim(),awb:String(d.aw
   sku:String(d.sku||'').trim(),qty:String(d.qty||'').trim(),claim:/^(yes|y|true)$/i.test(String(d.claim||''))?'Yes':'No',remark:String(d.remark||'').trim()}}
 const hasData=r=>['order_id','awb','seller','sku','qty','remark'].some(k=>r[k]);
 
-function save(){
-  let saved=0;const dups=[];
+/* ---------- CLOUD (Upstash Redis via /api/labels) ---------- */
+let PASS=localStorage.getItem('ls_pass')||'',lastVer=-1;
+async function api(method,body,qs=''){
+  const r=await fetch('/api/labels'+qs,{method,headers:{'Content-Type':'application/json','x-passcode':PASS},body:body?JSON.stringify(body):undefined});
+  if(r.status===401)throw new Error('PASS');
+  if(r.status===409)return {dup:true};
+  if(!r.ok)throw new Error(r.status+' '+(await r.text()).slice(0,200));
+  return r.json();
+}
+function persistRows(){try{localStorage.setItem('ls_rows',JSON.stringify(rows))}catch(e){}}
+async function fetchRows(){const j=await api('GET');rows=j.rows||[];lastVer=j.ver;persistRows()}
+async function refresh(force){
+  try{
+    if(!force&&lastVer>=0){const v=await api('GET',null,'?ver=1');if(v.ver===lastVer){$('sync').textContent='☁ Synced';return}}
+    await fetchRows();$('sync').textContent='☁ Synced';
+    if(curTab==2&&!$('tbl').contains(document.activeElement))renderRec();
+  }catch(e){
+    console.error(e);
+    if(e.message==='PASS'){$('sync').textContent='🔑 Passcode galat';if(!window._pw){window._pw=1;popup('Passcode galat hai, ya Vercel me APP_PASSCODE set nahi hai.','🔑 Passcode')}}
+    else if(String(e.message).startsWith('500'))$('sync').textContent='⚠ Upstash connect nahi hai';
+    else $('sync').textContent='⚠ Offline';
+  }
+}
+async function pushRows(list){
+  let added=0,skipped=0;
+  for(let i=0;i<list.length;i+=200){
+    const chunk=list.slice(i,i+200);
+    const j=await api('POST',{rows:chunk});
+    const ok=new Set((j.results||[]).filter(x=>x.status==='saved').map(x=>x.id));
+    chunk.forEach(r=>{if(ok.has(r.id)){rows.push(r);added++}else skipped++});
+  }
+  persistRows();return {added,skipped};
+}
+function setPass(){const p=prompt('Passcode daalo (wahi jo Vercel me APP_PASSCODE rakha hai):',PASS);if(p!==null){PASS=p.trim();localStorage.setItem('ls_pass',PASS);window._pw=0;refresh(true)}}
+async function init(){
+  if(!PASS)setPass();
+  const local=load('ls_rows',[]);
+  await refresh(true);
+  if($('sync').textContent.includes('Synced')&&!localStorage.getItem('ls_migrated')){
+    localStorage.setItem('ls_migrated','1');
+    const mine=local.filter(r=>hasData(r)&&!rows.some(x=>x.id===r.id)&&!dupOf(r,rows)).map(r=>({...clean(r),scanned_at:r.scanned_at||nowStr(),id:r.id||uid()}));
+    if(mine.length&&confirm('Is browser me '+mine.length+' purane labels hain jo cloud me nahi hain. Cloud me bhej du?')){
+      busy('Purana data cloud me ja raha hai...');
+      try{const x=await pushRows(mine);toast(x.added+' purane label cloud me gaye')}catch(e){popup('Purana data nahi ja paya. Internet check karke page dobara kholo.','⚠️ Error')}
+      busy(null);if(curTab==2)renderRec();
+    }
+  }
+  setInterval(()=>{if(!document.hidden)refresh()},45000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
+}
+
+/* ---------- save (cloud) ---------- */
+async function save(){
+  if(!cards.length)return;
+  busy('Save ho raha hai...');
+  try{await fetchRows()}catch(e){}
+  const send=[],dups=[];
   for(const c of cards){
     const r=clean(c);
     if(!hasData(r))continue;
-    if(dupOf(r,rows)){dups.push(r.awb||r.order_id);continue}
-    rows.push({...r,scanned_at:nowStr(),id:uid()});saved++;
+    if(dupOf(r,rows)||dupOf(r,send)){dups.push(r.awb||r.order_id);continue}
+    send.push({...r,scanned_at:nowStr(),id:uid()});
   }
-  if(!saveRows())return;
-  cards=[];render();toast(saved+' label save hue');
+  let failed=false,saved=0;
+  if(send.length){
+    try{
+      const j=await api('POST',{rows:send});
+      const st=Object.fromEntries((j.results||[]).map(x=>[x.id,x.status]));
+      send.forEach(r=>{if(st[r.id]==='saved'){rows.push(r);saved++}else dups.push(r.awb||r.order_id)});
+    }catch(e){failed=true;console.error(e)}
+  }
+  busy(null);
+  if(failed){popup('Save nahi hua (internet ya passcode check karo). Labels list me hi hain, dobara Save dabao.','⚠️ Save nahi hua');return}
+  cards=[];render();persistRows();
+  toast(saved+' label cloud me save hue');
   if(dups.length)popup('Duplicate skip hue:<br><b>'+dups.map(esc).join('<br>')+'</b>');
 }
 
@@ -303,14 +401,21 @@ function renderRec(){
      :`<td><input type="text" data-k="${k}" value="${esc(r[k])}"></td>`).join('')+
      `<td style="white-space:nowrap"><button class="btn g" onclick="upd('${r.id}')">Save</button> <button class="btn r" onclick="del('${r.id}')">X</button></td></tr>`).join('');
 }
-function upd(id){
+async function upd(id){
   const o={};document.querySelectorAll('#r'+id+' [data-k]').forEach(e=>o[e.dataset.k]=e.value);
   const n=clean(o);
   if(dupOf(n,rows.filter(r=>r.id!==id))){popup('Ye AWB/Order ID kisi aur row me pehle se hai');return}
-  Object.assign(rows.find(r=>r.id===id),n);
-  if(saveRows())toast('Update ho gaya');
+  try{
+    const res=await api('PUT',{id,row:n});
+    if(res.dup){popup('Ye AWB/Order ID kisi aur row me pehle se hai');return}
+    Object.assign(rows.find(r=>r.id===id),n);persistRows();toast('Update ho gaya');
+  }catch(e){popup('Update nahi hua. Internet/passcode check karo.','⚠️ Error')}
 }
-function del(id){if(!confirm('Ye row delete karni hai?'))return;rows=rows.filter(r=>r.id!==id);saveRows();renderRec()}
+async function del(id){
+  if(!confirm('Ye row delete karni hai?'))return;
+  try{await api('DELETE',null,'?id='+encodeURIComponent(id));rows=rows.filter(r=>r.id!==id);persistRows();renderRec()}
+  catch(e){popup('Delete nahi hua. Internet/passcode check karo.','⚠️ Error')}
+}
 
 /* ---------- Excel import / export ---------- */
 const HEAD=['Order ID','AWB','Seller','SKU','Received Qty','Claim','Remark','Scanned At'];
@@ -329,21 +434,23 @@ async function doImport(inp){
     const data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
     const alias={orderid:'order_id',awb:'awb',seller:'seller',sku:'sku',receivedqty:'qty',qty:'qty',claim:'claim',remark:'remark',scannedat:'scanned_at'};
     const idx={};(data[0]||[]).forEach((h,i)=>{const k=alias[norm(h).toLowerCase()];if(k)idx[k]=i});
-    let added=0,skipped=0;
+    let skipped=0;const list=[],seen=[...rows];
     for(const line of data.slice(1)){
       const d={};for(const k in idx)d[k]=line[idx[k]];
       const r=clean(d);if(!hasData(r))continue;
-      if(dupOf(r,rows)){skipped++;continue}
-      rows.push({...r,scanned_at:String(d.scanned_at||nowStr()),id:uid()});added++;
+      if(dupOf(r,seen)){skipped++;continue}
+      const row={...r,scanned_at:String(d.scanned_at||nowStr()),id:uid()};list.push(row);seen.push(row);
     }
-    if(saveRows()){popup('Import: '+added+' naye<br>Duplicate skip: '+skipped,'✅ Import ho gaya');renderRec()}
-  }catch(e){console.error(e);popup('File padh nahi payi. .xlsx file chuno.','⚠️ Error')}
+    busy('Import ho raha hai...');const x=await pushRows(list);busy(null);
+    popup('Import: '+x.added+' naye<br>Duplicate skip: '+(skipped+x.skipped),'✅ Import ho gaya');renderRec();
+  }catch(e){busy(null);console.error(e);popup('File padh nahi payi ya internet ki dikkat. .xlsx file chuno.','⚠️ Error')}
 }
 
 /* ---------- start ---------- */
 cards.forEach(c=>{c.ocr=false});
 setMode(mode);render();tab(curTab);
-setTimeout(()=>{try{warm()}catch(e){}},800);  // OCR model pehle se load
+setTimeout(()=>{try{warm()}catch(e){}},800);
+init();  // OCR model pehle se load
 if(cards.length)toast(cards.length+' unsaved label wapas aa gaye');
 </script>
 </body>
