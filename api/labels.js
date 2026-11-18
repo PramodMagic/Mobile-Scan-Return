@@ -2,13 +2,14 @@
 // Env vars: UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN (ya KV_REST_API_URL / KV_REST_API_TOKEN) aur APP_PASSCODE
 const URL_ = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
 const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
-const F = ['order_id', 'awb', 'seller', 'sku', 'qty', 'claim', 'remark', 'scanned_at'];
+const F = ['return_type', 'order_id', 'awb', 'seller', 'sku', 'qty', 'claim', 'remark', 'scanned_at'];
 const norm = v => String(v || '').replace(/\s+/g, '').toUpperCase();
 const keyOf = r => (norm(r.awb) ? 'A:' + norm(r.awb) : norm(r.order_id) ? 'O:' + norm(r.order_id) : '');
 const clean = r => {
   const o = {};
   F.forEach(k => (o[k] = String((r || {})[k] ?? '').trim().slice(0, 300)));
   o.claim = /^(yes|y|true)$/i.test(o.claim) ? 'Yes' : 'No';
+  o.return_type = /^rto$/i.test(o.return_type) ? 'RTO' : /^rtv$/i.test(o.return_type) ? 'RTV' : '';
   o.id = String((r || {}).id || '').slice(0, 40);
   return o;
 };

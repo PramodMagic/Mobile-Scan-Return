@@ -40,11 +40,13 @@ td input,td select{min-width:70px;padding:6px;font-size:13px}
 <div class="tabs"><button id="t1" class="on" onclick="tab(1)">Scan</button><button id="t2" onclick="tab(2)">Records / Edit</button></div>
 <main>
 <section id="p1">
+  <div class="note"><b>Return Type</b> (scan se pehle chuno)</div>
+  <div class="seg"><button id="tRTO" onclick="setType('RTO')">RTO</button><button id="tRTV" onclick="setType('RTV')">RTV</button></div>
   <div class="seg"><button id="m1" class="on" onclick="setMode('single')">Single Label</button><button id="m2" onclick="setMode('multi')">Multi Label</button></div>
   <div class="note" id="modeNote"></div>
   <input id="cam" type="file" accept="image/*" capture="environment" hidden onchange="scan(this)">
   <input id="skuFile" type="file" accept="image/*" capture="environment" hidden onchange="scanSku(this)">
-  <button class="btn big" onclick="cam.click()">📷 Photo kheencho</button>
+  <button id="camBtn" class="btn big" onclick="needType()&&cam.click()">📷 Photo kheencho</button>
   <div id="cards"></div>
   <button id="saveBtn" class="btn g big" style="display:none;margin-top:8px" onclick="save()">✅ Save karo</button>
 </section>
@@ -78,14 +80,33 @@ function load(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v??d}c
 /* ---------- state ---------- */
 let rows=load('ls_rows',[]);
 const st=load('ls_state',{});
-let mode=st.mode||'single',cards=Array.isArray(st.cards)?st.cards:[],curTab=st.tab||1,skuIdx=0;
-function persist(){try{localStorage.setItem('ls_state',JSON.stringify({mode,cards,tab:curTab}))}catch(e){}}
+let rtype=st.rtype||'',mode=st.mode||'single',cards=Array.isArray(st.cards)?st.cards:[],curTab=st.tab||1,skuIdx=0;
+function persist(){try{localStorage.setItem('ls_state',JSON.stringify({mode,cards,tab:curTab,rtype}))}catch(e){}}
 function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2600)}
 function popup(m,title='⚠️ Duplicate!'){$('mtitle').textContent=title;$('mmsg').innerHTML=m;$('modal').style.display='flex'}
 function busy(m){if(m){$('busyMsg').textContent=m;$('busy').style.display='flex'}else $('busy').style.display='none'}
 function tab(n){curTab=n;persist();$('p1').style.display=n==1?'':'none';$('p2').style.display=n==2?'':'none';$('t1').className=n==1?'on':'';$('t2').className=n==2?'on':'';if(n==2){renderRec();refresh()}}
 function setMode(m){mode=m;persist();$('m1').className=m=='single'?'on':'';$('m2').className=m=='multi'?'on':'';
   $('modeNote').textContent=m=='single'?'Single: ek baar me ek label. Nayi photo purane card ko replace karegi.':'Multi: ek ke baad ek photo lo, sab cards list me judte jayenge, phir ek saath Save karo.'}
+
+/* ---------- return type (RTO / RTV) ---------- */
+function updateTypeUI(){
+  $('tRTO').className=rtype=='RTO'?'on':'';$('tRTV').className=rtype=='RTV'?'on':'';
+  $('camBtn').style.opacity=rtype?'1':'.5';
+}
+function setType(t){rtype=t;persist();updateTypeUI()}
+function needType(){
+  if(rtype)return true;
+  popup('Scan se pehle upar se Return Type chuno: <b>RTO</b> ya <b>RTV</b>','Return Type chuno');return false;
+}
+function qcDate(t){const m=String(t||'').match(/^(\d{4})-(\d{2})-(\d{2})/);return m?`${m[3]}-${m[2]}-${m[1]}`:String(t||'')}
+function toISO(v){
+  if(v instanceof Date&&!isNaN(v))return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())} 00:00:00`;
+  const t=String(v||'').trim();
+  let m=t.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})/);if(m)return `${m[3]}-${pad(+m[2])}-${pad(+m[1])} 00:00:00`;
+  m=t.match(/^\d{4}-\d{2}-\d{2}/);if(m)return t.length>10?t:t+' 00:00:00';
+  return nowStr();
+}
 
 /* ---------- duplicate ---------- */
 function dupOf(r,list){
@@ -176,6 +197,31 @@ async function ocrText(canvas,hint){
 
 /* ---------- field extraction ---------- */
 const DIG={O:'0',Q:'0',D:'0',C:'0',I:'1',L:'1',S:'5',B:'8',Z:'2',G:'6'};
+// Seller: pehle "Shipped By", phir "return to" (If undelivered, please return to:), phir "Sold By/Seller", phir "Ship To" (return label me company yahi hoti hai)
+function findSeller(L){
+  const pats=[/ship(?:ped)?\s*by\s*[:\-]?\s*(.*)$/i,/return\s*to\s*[:\-]?\s*(.*)$/i,/(?:sold\s*by|seller)\s*[:\-]?\s*(.*)$/i,/(?:ship(?:ped)?|deliver(?:y)?)\s*to\s*[:\-]?\s*(.*)$/i];
+  const cl=v=>v.replace(/\(.*?\)|\(.*$/g,'').replace(/\bAWB.*$/i,'').split(/GST|Phone|Mob|PIN|[,|]/i)[0].replace(/^[\s:\-]+|[\s:\-]+$/g,'');
+  const bad=v=>/undelivered|return\s*to/i.test(v);
+  for(const re of pats){
+    for(let k=0;k<L.length;k++){
+      const mm=L[k].match(re);if(!mm)continue;
+      let v=cl(mm[1]);if(bad(v))v='';
+      if(v.length<3){for(let q=k+1;q<Math.min(k+4,L.length);q++){if(L[q]&&!/^AWB|^GST|^\(|undelivered|return\s*to/i.test(L[q])){v=cl(L[q]);break}}}
+      if(v.length>=3&&!bad(v))return v;
+    }
+  }
+  return '';
+}
+function lev(a,b){const d=[];for(let i=0;i<=a.length;i++){d[i]=[i];}for(let j=1;j<=b.length;j++)d[0][j]=j;
+  for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return d[a.length][b.length]}
+function close(a,b){a=norm(a);b=norm(b);return !!a&&!!b&&lev(a,b)<=Math.max(2,Math.floor(Math.min(a.length,b.length)*0.15))}
+// Kai barcode ho to AWB wala chuno: jo label par "Awb: ..." likhe number se mile; Order # wale barcode ko chhodo
+function chooseAwb(all,f){
+  if(!all.length)return null;
+  if(f.awbText){const m=all.find(c=>close(c,f.awbText));if(m)return m}
+  const rest=all.filter(c=>!(f.order_id&&close(c,f.order_id)));
+  return rest.length?rest[0]:null;
+}
 function extractFields(text,codes,extra=[]){
   let seller='',awb='',awbOcr=false,m;
   const A=codes[0]||'';
@@ -187,6 +233,12 @@ function extractFields(text,codes,extra=[]){
     if([...strong,...weak].some(x=>key(x)==key(v)||key(v).includes(key(x))))return;
     arr.push(v);
   };
+  // 0) Amazon return label: "AMAZON RETURNS: 403-0926952-7075550" (number agli line me bhi ho sakta hai)
+  for(const x of text.matchAll(/amazon\s*c?\s*returns?\s*[:\-]?\s*(?=[A-Za-z0-9\-_]*\d)([A-Za-z0-9][A-Za-z0-9\-_]{5,})/gi)){
+    let v=x[1];
+    if(/^[0-9OQDCILSBZG]{3}-[0-9OQDCILSBZG]{7}-[0-9OQDCILSBZG]{7}$/i.test(v))v=v.toUpperCase().replace(/[OQDCILSBZG]/g,c=>DIG[c]);
+    put(strong,v);
+  }
   // 1) label par "Order ID / Order No / Sub Order No" likha ho
   for(const x of text.matchAll(/(?:sub\s*order|customer\s*order|[O0]rder)\s*(?:[I1l]d|no\.?|number|#|ref(?:erence)?)\s*[:\-#.]?\s*(?=[A-Za-z0-9_\-\/]*\d)([A-Za-z0-9][A-Za-z0-9_\-\/]{2,})/gi))put(strong,x[1]);
   // 2) jaane-pehchaane format (bina likhe bhi): Amazon, Flipkart, Meesho
@@ -213,19 +265,21 @@ function extractFields(text,codes,extra=[]){
     if(m&&norm(m[1])!=norm(order)){awb=m[1];awbOcr=true}
     if(!awb){for(const d of (text.match(/\b\d{10,16}\b/g)||[])){if(norm(d)!=norm(order)){awb=d;awbOcr=true;break}}}
   }
-  m=text.match(/(?:sold\s*by|seller|ship(?:ped)?\s*from|shipper)\s*[:\-]?\s*([^\n,|]{3,60})/i);
-  if(m)seller=m[1].split(/GST|Phone|Mob|PIN/i)[0].replace(/^[\s:\-]+|[\s:\-]+$/g,'');
-  return {order_id:order,awb,seller,awbOcr,opts:[...strong,...weak].slice(0,6),guess:!strong.length&&!!weak.length};
+  seller=findSeller(text.split('\n').map(x=>x.trim()));
+  const mA=text.match(/(?:awb|way\s*bill)\s*(?:id|no\.?|number|#)?\s*[:\-#]?\s*(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{8,})/i);
+  const awbText=mA?mA[1]:'';
+  return {order_id:order,awb,seller,awbOcr,awbText,opts:[...strong,...weak].slice(0,6),guess:!strong.length&&!!weak.length};
 }
 
 /* ---------- scan label: AWB turant, baaki OCR background me ---------- */
 async function scan(inp){
   const f=inp.files[0];inp.value='';if(!f)return;
+  if(!rtype){needType();return}
   busy('Barcode padh raha hai...');
   let c=null,bc=null;
   try{c=await loadCanvas(f,1600);bc=await detectBarcodes(c,FMT_MAIN)}catch(e){console.error(e)}
   busy(null);
-  const card={id:uid(),order_id:'',awb:bc?bc.v:'',seller:'',sku:'',qty:'',claim:'No',remark:'',ocr:!!c};
+  const card={id:uid(),return_type:rtype,order_id:'',awb:bc?bc.v:'',seller:'',sku:'',qty:'',claim:'No',remark:'',ocr:!!c};
   if(bc)card.extra=(bc.all||[]).filter(x=>x!==bc.v);
   card.duplicate=dupOf(card,rows)||(mode=='multi'&&dupOf(card,cards));
   if(mode=='single')cards=[card];else cards.push(card);
@@ -237,6 +291,14 @@ async function scan(inp){
 async function runOcr(card,c,hint){
   try{
     const txt=await ocrText(c,hint);card.dbg=txt;
+    const all=[card.awb,...(card.extra||[])].filter(Boolean);
+    if(all.length){
+      const f0=extractFields(txt,[],[]);
+      const ch=chooseAwb(all,f0);
+      if(ch!==null){card.awb=ch}
+      else if(f0.awbText){card.awb=f0.awbText;card.awbOcr=true}
+      card.extra=all.filter(x=>x!==card.awb);
+    }
     const f=extractFields(txt,card.awb?[card.awb]:[],card.extra||[]);
     if(!card.order_id&&f.order_id){card.order_id=f.order_id;card.orderGuess=f.guess}
     card.orderOpts=f.opts;
@@ -298,6 +360,7 @@ function render(){
   $('cards').innerHTML=cards.map((c,i)=>`<div class="card ${c.duplicate?'dup':''}" id="c_${c.id}">
    ${c.duplicate?'<b style="color:#dc2626">DUPLICATE - save nahi hoga</b>':''}
    <div class="note" id="st_${c.id}">${statusText(c)}</div>
+   <label>Return Type</label><select onchange="cards[${i}].return_type=this.value"><option value="" ${!c.return_type?'selected':''}>-</option><option ${c.return_type=='RTO'?'selected':''}>RTO</option><option ${c.return_type=='RTV'?'selected':''}>RTV</option></select>
    <label>Order ID</label><input type="text" id="o_${c.id}" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value"><div id="oc_${c.id}">${orderChips(c,i)}</div>
    <label>AWB</label><input type="text" id="a_${c.id}" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value"><div id="ac_${c.id}">${awbChips(c,i)}</div>
    <label>Seller</label><input type="text" id="s_${c.id}" value="${esc(c.seller)}" oninput="cards[${i}].seller=this.value">
@@ -317,7 +380,7 @@ function render(){
 $('cards').addEventListener('input',persist);
 $('cards').addEventListener('change',persist);
 
-function clean(d){return {order_id:String(d.order_id||'').trim(),awb:String(d.awb||'').trim(),seller:String(d.seller||'').trim(),
+function clean(d){const rt=String(d.return_type||'').trim().toUpperCase();return {return_type:rt==='RTO'||rt==='RTV'?rt:'',order_id:String(d.order_id||'').trim(),awb:String(d.awb||'').trim(),seller:String(d.seller||'').trim(),
   sku:String(d.sku||'').trim(),qty:String(d.qty||'').trim(),claim:/^(yes|y|true)$/i.test(String(d.claim||''))?'Yes':'No',remark:String(d.remark||'').trim()}}
 const hasData=r=>['order_id','awb','seller','sku','qty','remark'].some(k=>r[k]);
 
@@ -400,12 +463,12 @@ async function save(){
 }
 
 /* ---------- records ---------- */
-const F=['order_id','awb','seller','sku','qty','claim','remark'];
+const F=['return_type','order_id','awb','seller','sku','qty','claim','remark'];
 function renderRec(){
   const q=$('q').value.toLowerCase();
   const list=rows.filter(r=>!q||F.some(k=>String(r[k]).toLowerCase().includes(q))).slice().reverse();
-  $('tbl').innerHTML='<tr><th>Order ID</th><th>AWB</th><th>Seller</th><th>SKU</th><th>Qty</th><th>Claim</th><th>Remark</th><th></th></tr>'+
-   list.map(r=>'<tr id="r'+r.id+'">'+F.map(k=>k=='claim'
+  $('tbl').innerHTML='<tr><th>Type</th><th>Order ID</th><th>AWB</th><th>Seller</th><th>SKU</th><th>Qty</th><th>Claim</th><th>Remark</th><th></th></tr>'+
+   list.map(r=>'<tr id="r'+r.id+'">'+F.map(k=>k=='return_type'?`<td><select data-k="return_type">${['','RTO','RTV'].map(o=>`<option value="${o}" ${r.return_type==o?'selected':''}>${o||'-'}</option>`).join('')}</select></td>`:k=='claim'
      ?`<td><select data-k="claim"><option ${r.claim=='No'?'selected':''}>No</option><option ${r.claim=='Yes'?'selected':''}>Yes</option></select></td>`
      :`<td><input type="text" data-k="${k}" value="${esc(r[k])}"></td>`).join('')+
      `<td style="white-space:nowrap"><button class="btn g" onclick="upd('${r.id}')">Save</button> <button class="btn r" onclick="del('${r.id}')">X</button></td></tr>`).join('');
@@ -427,28 +490,28 @@ async function del(id){
 }
 
 /* ---------- Excel import / export ---------- */
-const HEAD=['Order ID','AWB','Seller','SKU','Received Qty','Claim','Remark','Scanned At'];
+const HEAD=['QC Date','Return Type','Order ID','AWB','Seller','SKU','Qty','Claim','Remark'];
 function exportXlsx(){
   if(!rows.length){toast('Export karne ke liye koi data nahi');return}
-  const data=rows.map(r=>[r.order_id,r.awb,r.seller,r.sku,r.qty,r.claim,r.remark,r.scanned_at]);
+  const data=rows.map(r=>[qcDate(r.scanned_at),r.return_type||'',r.order_id,r.awb,r.seller,r.sku,r.qty,r.claim,r.remark]);
   const ws=XLSX.utils.aoa_to_sheet([HEAD,...data]);
-  ws['!cols']=[22,20,22,18,13,8,30,20].map(w=>({wch:w}));
+  ws['!cols']=[12,12,26,20,24,18,8,8,30].map(w=>({wch:w}));
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Labels');
   const d=new Date();XLSX.writeFile(wb,`labels_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.xlsx`);
 }
 async function doImport(inp){
   const f=inp.files[0];inp.value='';if(!f)return;
   try{
-    const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
+    const wb=XLSX.read(await f.arrayBuffer(),{type:'array',cellDates:true});
     const data=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
-    const alias={orderid:'order_id',awb:'awb',seller:'seller',sku:'sku',receivedqty:'qty',qty:'qty',claim:'claim',remark:'remark',scannedat:'scanned_at'};
+    const alias={orderid:'order_id',awb:'awb',seller:'seller',sku:'sku',receivedqty:'qty',qty:'qty',claim:'claim',remark:'remark',scannedat:'scanned_at',qcdate:'scanned_at',returntype:'return_type'};
     const idx={};(data[0]||[]).forEach((h,i)=>{const k=alias[norm(h).toLowerCase()];if(k)idx[k]=i});
     let skipped=0;const list=[],seen=[...rows];
     for(const line of data.slice(1)){
       const d={};for(const k in idx)d[k]=line[idx[k]];
       const r=clean(d);if(!hasData(r))continue;
       if(dupOf(r,seen)){skipped++;continue}
-      const row={...r,scanned_at:String(d.scanned_at||nowStr()),id:uid()};list.push(row);seen.push(row);
+      const row={...r,scanned_at:toISO(d.scanned_at),id:uid()};list.push(row);seen.push(row);
     }
     busy('Import ho raha hai...');const x=await pushRows(list);busy(null);
     popup('Import: '+x.added+' naye<br>Duplicate skip: '+(skipped+x.skipped),'✅ Import ho gaya');renderRec();
@@ -457,7 +520,7 @@ async function doImport(inp){
 
 /* ---------- start ---------- */
 cards.forEach(c=>{c.ocr=false});
-setMode(mode);render();tab(curTab);
+updateTypeUI();setMode(mode);render();tab(curTab);
 setTimeout(()=>{try{warm()}catch(e){}},800);
 init();  // OCR model pehle se load
 if(cards.length)toast(cards.length+' unsaved label wapas aa gaye');
