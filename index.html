@@ -107,93 +107,144 @@ function rot(c,a){
   const x=o.getContext('2d');x.translate(o.width/2,o.height/2);x.rotate(a*Math.PI/180);x.drawImage(c,-c.width/2,-c.height/2);return o;
 }
 
-/* ---------- barcode (ZXing) ---------- */
-let reader;
-function getReader(){
-  if(!reader){
-    const h=new Map(),F=ZXing.BarcodeFormat;
+/* ---------- barcode: BarcodeDetector (bahut tez) + ZXing fallback ---------- */
+const FMT_MAIN=['code_128','code_39','code_93','codabar','qr_code','data_matrix'];
+const FMT_RETAIL=['ean_13','ean_8','upc_a','upc_e','itf'];
+const LINEAR=['code_128','code_39','code_93','codabar'];
+const zxCache={};
+function zxReader(formats){
+  const key=formats.join();
+  if(!zxCache[key]){
+    const F=ZXing.BarcodeFormat,h=new Map();
+    const m={code_128:F.CODE_128,code_39:F.CODE_39,code_93:F.CODE_93,codabar:F.CODABAR,qr_code:F.QR_CODE,data_matrix:F.DATA_MATRIX,ean_13:F.EAN_13,ean_8:F.EAN_8,upc_a:F.UPC_A,upc_e:F.UPC_E,itf:F.ITF};
+    h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,formats.map(x=>m[x]));
     h.set(ZXing.DecodeHintType.TRY_HARDER,true);
-    h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[F.CODE_128,F.CODE_39,F.EAN_13,F.EAN_8,F.UPC_A,F.ITF,F.CODABAR,F.QR_CODE,F.DATA_MATRIX]);
-    reader=new ZXing.BrowserMultiFormatReader(h);
+    const r=new ZXing.MultiFormatReader();r.setHints(h);zxCache[key]=r;
   }
-  return reader;
+  return zxCache[key];
 }
-async function decodeBarcode(canvas){
-  for(const a of [0,90,270,180]){
-    try{
-      const r=await getReader().decodeFromImageUrl(rot(canvas,a).toDataURL('image/jpeg',0.92));
-      const v=r.getText().trim();if(v)return {v,angle:a};
-    }catch(e){}
+function zxDecode(canvas,formats){
+  const w=canvas.width,hh=canvas.height,d=canvas.getContext('2d').getImageData(0,0,w,hh).data,l=new Uint8ClampedArray(w*hh);
+  for(let i=0,j=0;j<l.length;i+=4,j++)l[j]=(d[i]*306+d[i+1]*601+d[i+2]*117)>>10;
+  const src=new ZXing.RGBLuminanceSource(l,w,hh),rd=zxReader(formats);
+  for(const B of [ZXing.HybridBinarizer,ZXing.GlobalHistogramBinarizer]){
+    try{return rd.decode(new ZXing.BinaryBitmap(new B(src))).getText().trim()}catch(e){}
   }
   return null;
 }
+async function detectBarcodes(canvas,formats){
+  if('BarcodeDetector' in window){
+    try{
+      const sup=await BarcodeDetector.getSupportedFormats();
+      const use=formats.filter(f=>sup.includes(f));
+      if(use.length){
+        const res=await new BarcodeDetector({formats:use}).detect(canvas);
+        if(res.length){
+          const lin=res.filter(r=>LINEAR.includes(r.format));
+          const b=(lin.length?lin:res).sort((a,b)=>b.rawValue.length-a.rawValue.length)[0];
+          let hint=null;const p=b.cornerPoints;
+          if(p&&p.length>1){const th=Math.atan2(p[1].y-p[0].y,p[1].x-p[0].x)*180/Math.PI;hint=((-Math.round(th/90)*90)%360+360)%360}
+          return {v:b.rawValue.trim(),hint};
+        }
+      }
+    }catch(e){console.warn(e)}
+  }
+  for(const a of [0,90,270,180]){const v=zxDecode(rot(canvas,a),formats);if(v)return {v,hint:a}}
+  return null;
+}
 
-/* ---------- OCR (Tesseract.js) ---------- */
-let worker;
-async function getWorker(){if(!worker)worker=await Tesseract.createWorker('eng');return worker}
-async function ocrText(canvas,hint=0){
-  const w=await getWorker();
-  const order=[hint,...[0,90,270,180].filter(a=>a!==hint)];
+/* ---------- OCR (Tesseract.js) - background me chalta hai ---------- */
+let workerP;
+function warm(){if(!workerP)workerP=Tesseract.createWorker('eng');return workerP}
+async function ocrText(canvas,hint){
+  const w=await warm();
+  const s=Math.min(1,1400/Math.max(canvas.width,canvas.height));
+  let c=canvas;
+  if(s<1){c=document.createElement('canvas');c.width=Math.round(canvas.width*s);c.height=Math.round(canvas.height*s);c.getContext('2d').drawImage(canvas,0,0,c.width,c.height)}
+  const first=hint==null?0:hint;
   let best={score:-1,text:''};
-  for(const a of order){
-    const {data}=await w.recognize(rot(canvas,a));
-    const score=(data.words||[]).filter(x=>x.confidence>60).reduce((s,x)=>s+x.text.length,0);
+  for(const a of [first,...[0,90,270,180].filter(x=>x!==first)]){
+    const {data}=await w.recognize(rot(c,a));
+    const score=(data.words||[]).filter(x=>x.confidence>60).reduce((t,x)=>t+x.text.length,0);
     if(score>best.score)best={score,text:data.text};
-    if(score>=60)break;
+    if(score>=40)break;
   }
   return best.text;
 }
 
 /* ---------- field extraction ---------- */
+const DIG={O:'0',Q:'0',D:'0',C:'0',I:'1',L:'1',S:'5',B:'8',Z:'2',G:'6'};
 function extractFields(text,codes){
-  let order='',awb='',seller='',m;
-  m=text.match(/(?:sub\s*order|order)\s*(?:id|no\.?|number|#)\s*[:\-#]?\s*(?=[A-Za-z0-9_\-]*\d)([A-Za-z0-9][A-Za-z0-9_\-]{5,})/i);
-  if(m)order=m[1];
-  else{m=text.match(/\b(OD\d{15,22}|\d{3}-\d{7}-\d{7})\b/);if(m)order=m[1]}
-  for(const c of codes){if(c.length>=8&&norm(c)!=norm(order)&&!(order&&norm(c).includes(norm(order)))){awb=c;break}}
+  let order='',awb='',seller='',awbOcr=false,m;
+  // Amazon order id (OCR ki galti sudharke): 403-0926952-7075550
+  m=text.match(/\b([0-9OQDCILSBZG]{3}-[0-9OQDCILSBZG]{7}-[0-9OQDCILSBZG]{7})\b/i);
+  if(m)order=m[1].toUpperCase().replace(/[OQDCILSBZG]/g,c=>DIG[c]);
+  if(!order){m=text.match(/\b(OD\d{15,22})\b/);if(m)order=m[1]}
+  if(!order){m=text.match(/(?:sub\s*order|order)\s*(?:id|no\.?|number|#)\s*[:\-#]?\s*(?=[A-Za-z0-9_\-]*\d)([A-Za-z0-9][A-Za-z0-9_\-]{5,})/i);if(m)order=m[1]}
+  for(const c of codes){if(c.length>=8&&norm(c)!=norm(order)){awb=c;break}}
   if(!awb){m=text.match(/(?:awb|way\s*bill|tracking)\s*(?:id|no\.?|number|#)?\s*[:\-#]?\s*(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{8,})/i);
-    if(m&&norm(m[1])!=norm(order))awb=m[1]}
-  if(!awb){for(const d of (text.match(/\b\d{10,16}\b/g)||[])){if(norm(d)!=norm(order)){awb=d;break}}}
+    if(m&&norm(m[1])!=norm(order)){awb=m[1];awbOcr=true}}
+  if(!awb){for(const d of (text.match(/\b\d{10,16}\b/g)||[])){if(norm(d)!=norm(order)){awb=d;awbOcr=true;break}}}
   m=text.match(/(?:sold\s*by|seller|ship(?:ped)?\s*from|shipper)\s*[:\-]?\s*([^\n,|]{3,60})/i);
   if(m)seller=m[1].split(/GST|Phone|Mob|PIN/i)[0].replace(/^[\s:\-]+|[\s:\-]+$/g,'');
-  return {order_id:order,awb,seller};
+  return {order_id:order,awb,seller,awbOcr};
 }
 
-/* ---------- scan label ---------- */
+/* ---------- scan label: AWB turant, baaki OCR background me ---------- */
 async function scan(inp){
   const f=inp.files[0];inp.value='';if(!f)return;
-  busy('Label scan ho raha hai...');
-  let res={order_id:'',awb:'',seller:''};
-  try{
-    const c=await loadCanvas(f);
-    const bc=await decodeBarcode(c);
-    const text=await ocrText(c,bc?bc.angle:0);
-    res=extractFields(text,bc?[bc.v]:[]);
-  }catch(e){console.error(e);toast('Scan me dikkat aayi, details khud bhar do')}
+  busy('Barcode padh raha hai...');
+  let c=null,bc=null;
+  try{c=await loadCanvas(f,1600);bc=await detectBarcodes(c,FMT_MAIN)}catch(e){console.error(e)}
   busy(null);
-  const card={...res,sku:'',qty:'',claim:'No',remark:'',duplicate:dupOf(res,rows)||(mode=='multi'&&dupOf(res,cards))};
-  if(!(res.order_id||res.awb||res.seller))toast('Label padha nahi gaya, details khud bhar do');
+  const card={id:uid(),order_id:'',awb:bc?bc.v:'',seller:'',sku:'',qty:'',claim:'No',remark:'',ocr:!!c};
+  card.duplicate=dupOf(card,rows)||(mode=='multi'&&dupOf(card,cards));
   if(mode=='single')cards=[card];else cards.push(card);
   render();
-  if(card.duplicate)popup('Ye pehle se saved hai:<br><b>'+esc(res.awb||res.order_id)+'</b>');
+  if(card.duplicate)popup('Ye pehle se saved hai:<br><b>'+esc(card.awb)+'</b>');
+  if(!bc)toast('Barcode nahi padha, text se try ho raha hai...');
+  if(c)runOcr(card,c,bc?bc.hint:null);
+}
+async function runOcr(card,c,hint){
+  try{
+    const f=extractFields(await ocrText(c,hint),card.awb?[card.awb]:[]);
+    if(!card.order_id&&f.order_id)card.order_id=f.order_id;
+    if(!card.seller&&f.seller)card.seller=f.seller;
+    if(!card.awb&&f.awb){card.awb=f.awb;card.awbOcr=true}
+  }catch(e){console.error(e)}
+  card.ocr=false;
+  const was=card.duplicate;
+  card.duplicate=dupOf(card,rows)||(mode=='multi'&&dupOf(card,cards.filter(x=>x!==card)));
+  if(!cards.includes(card))return;
+  syncCard(card);persist();
+  if(card.duplicate&&!was)popup('Ye pehle se saved hai:<br><b>'+esc(card.awb||card.order_id)+'</b>');
+}
+function syncCard(c){
+  const set=(p,v)=>{const e=$(p+c.id);if(e&&e.value!==v&&document.activeElement!==e)e.value=v};
+  set('o_',c.order_id);set('a_',c.awb);set('s_',c.seller);
+  const st=$('st_'+c.id);if(st)st.textContent=(c.ocr?'⏳ Order ID / Seller padh raha hai... (tab tak SKU/Qty bhar sakte ho)  ':'')+(c.awbOcr?'⚠ AWB text se aaya, barcode ke number se match karke check karo':'');
+  const el=$('c_'+c.id);if(el)el.className='card'+(c.duplicate?' dup':'');
 }
 
 /* ---------- scan SKU ---------- */
 async function scanSku(inp){
   const f=inp.files[0];inp.value='';if(!f)return;
+  const c0=cards[skuIdx];if(!c0)return;
   busy('SKU scan ho raha hai...');
-  const c0=cards[skuIdx];
   try{
-    const c=await loadCanvas(f);
-    const bc=await decodeBarcode(c);
+    const c=await loadCanvas(f,1600);
+    const bc=await detectBarcodes(c,FMT_MAIN);
     if(bc){c0.sku=bc.v;c0.skuOpts=[];toast('SKU mil gaya')}
     else{
+      busy('Barcode nahi mila, text padh raha hai...');
       const text=await ocrText(c,0);
       const cands=[];
       text.split('\n').map(x=>x.trim()).forEach(l=>{if(l.length>=3&&l.length<=40&&/[A-Za-z0-9]/.test(l)&&!cands.includes(l))cands.push(l)});
-      const m=text.match(/sku\s*[:\-#]?\s*([A-Za-z0-9][A-Za-z0-9_\-\. ]{2,40})/i);
-      if(m){c0.sku=m[1].trim();toast('SKU mil gaya')}else toast(cands.length?'SKU pakka nahi mila, neeche se chuno ya type karo':'SKU nahi mila, type kar do');
-      c0.skuOpts=cands.slice(0,6);
+      const m=text.match(/sku\s*[:\-#]?\s*([A-Za-z0-9][A-Za-z0-9_\-\. ]{2,40})/i)||text.match(/\b([A-Z]{2,6}[-_]?\d{5,})\b/);
+      const rb=await detectBarcodes(c,FMT_RETAIL);
+      const opts=[...(rb?[rb.v]:[]),...cands].slice(0,6);
+      if(m){c0.sku=m[1].trim();toast('SKU mil gaya')}else toast(opts.length?'SKU pakka nahi mila, neeche se chuno ya type karo':'SKU nahi mila, type kar do');
+      c0.skuOpts=opts;
     }
   }catch(e){console.error(e);toast('SKU scan nahi hua, type kar do')}
   busy(null);render();
@@ -202,11 +253,13 @@ function pickSku(i,j){cards[i].sku=cards[i].skuOpts[j];render()}
 
 /* ---------- cards ---------- */
 function render(){
-  $('cards').innerHTML=cards.map((c,i)=>`<div class="card ${c.duplicate?'dup':''}">
+  cards.forEach(c=>{c.id=c.id||uid()});
+  $('cards').innerHTML=cards.map((c,i)=>`<div class="card ${c.duplicate?'dup':''}" id="c_${c.id}">
    ${c.duplicate?'<b style="color:#dc2626">DUPLICATE - save nahi hoga</b>':''}
-   <label>Order ID</label><input type="text" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value">
-   <label>AWB</label><input type="text" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value">
-   <label>Seller</label><input type="text" value="${esc(c.seller)}" oninput="cards[${i}].seller=this.value">
+   <div class="note" id="st_${c.id}">${c.ocr?'⏳ Order ID / Seller padh raha hai... (tab tak SKU/Qty bhar sakte ho)  ':''}${c.awbOcr?'⚠ AWB text se aaya, barcode ke number se match karke check karo':''}</div>
+   <label>Order ID</label><input type="text" id="o_${c.id}" value="${esc(c.order_id)}" oninput="cards[${i}].order_id=this.value">
+   <label>AWB</label><input type="text" id="a_${c.id}" value="${esc(c.awb)}" oninput="cards[${i}].awb=this.value">
+   <label>Seller</label><input type="text" id="s_${c.id}" value="${esc(c.seller)}" oninput="cards[${i}].seller=this.value">
    <label>SKU (type karo ya scan karo)</label>
    <div style="display:flex;gap:6px"><input type="text" value="${esc(c.sku)}" oninput="cards[${i}].sku=this.value"><button class="btn s" type="button" onclick="skuIdx=${i};skuFile.click()">📷 Scan</button></div>
    ${(c.skuOpts||[]).map((o,j)=>o!=c.sku?`<span class="chip" onclick="pickSku(${i},${j})">${esc(o)}</span>`:'').join('')}
@@ -288,7 +341,9 @@ async function doImport(inp){
 }
 
 /* ---------- start ---------- */
+cards.forEach(c=>{c.ocr=false});
 setMode(mode);render();tab(curTab);
+setTimeout(()=>{try{warm()}catch(e){}},800);  // OCR model pehle se load
 if(cards.length)toast(cards.length+' unsaved label wapas aa gaye');
 </script>
 </body>
